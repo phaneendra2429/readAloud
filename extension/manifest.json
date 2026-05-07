@@ -1,0 +1,15 @@
+{
+  "manifest_version": 3,
+  "name": "Piper Read Aloud",
+  "version": "1.0.0",
+  "description": "Stream Piper neural TTS from Docker via a native messaging bridge.",
+  "minimum_chrome_version": "109",
+  "permissions": ["nativeMessaging", "offscreen", "scripting", "activeTab"],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Piper Read Aloud"
+  }
+}

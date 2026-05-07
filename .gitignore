@@ -1,0 +1,11 @@
+voices/*.onnx
+voices/*.onnx.json
+voices/*.json
+!voices/.gitkeep
+
+__pycache__/
+*.py[cod]
+.Python
+.venv/
+venv/
+.env

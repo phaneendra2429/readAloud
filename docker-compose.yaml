@@ -1,0 +1,12 @@
+services:
+  piper-api:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    ports:
+      - "8765:8765"
+    volumes:
+      - ./voices:/voices
+    environment:
+      PIPER_DEFAULT_VOICE: ${PIPER_DEFAULT_VOICE:-en_US-lessac-medium}
+      PIPER_VOICES_DIR: /voices

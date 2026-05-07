@@ -1,0 +1,4 @@
+piper-tts
+onnxruntime
+fastapi
+uvicorn[standard]
