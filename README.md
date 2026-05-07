@@ -1,168 +1,179 @@
-# Piper Read Aloud (Chrome + Docker)
+# Piper Read Aloud
 
-Local neural text-to-speech using [Piper](https://github.com/OHF-Voice/piper1-gpl) inside Docker, a small **FastAPI** streaming API (**NDJSON** over HTTP), a **Native Messaging** bridge on your PC, and a Manifest **V3** Chrome extension. Playback streams chunk-by-chunk (no single giant WAV buffer).
+Read selected web page text aloud using **local** [Piper](https://github.com/OHF-Voice/piper1-gpl) TTS in Docker, plus a Chrome extension. Piper is **GPL-3.0**—keep license obligations in mind if you redistribute builds.
 
-**Note:** Piper is licensed under **GPL-3.0**. Keep GPL obligations in mind if you redistribute combined binaries.
+---
 
-## Prerequisites
+## Quick setup
 
-- Docker Desktop (or Docker Engine) with Compose
-- Google Chrome, Microsoft Edge, or Brave (Chromium 109+ for `offscreen` documents)
-- Python **3.10+** on Windows for the native host (`python` on PATH), or pass `-PythonExe` to the installer script
+**You need:** [Docker Desktop](https://www.docker.com/products/docker-desktop/) (with Compose), **Python 3.10+** on your PATH, and **Chrome**, **Edge**, or **Brave** (version that supports extensions + offscreen documents).
 
-## 1. Voice models
+All commands below assume you opened a terminal in the **repo root** (`readAloud`).
 
-Put Piper ONNX voices under `./voices` at the repo root (mounted into the container as `/voices`).
+### 1. Download a voice into `voices\`
 
-**Download voices** (pick one approach):
+Easiest on Windows (uses Docker so you don’t fight Python wheels):
 
-- **pip / uv in a venv:** install `piper-tts`, then run the downloader (files land in the current directory unless you pass `--data-dir`):
+**PowerShell:**
 
-  ```bash
-  pip install piper-tts
-  python -m piper.download_voices --data-dir voices en_US-lessac-medium
-  ```
+```powershell
+docker run --rm -v "$(Resolve-Path .\voices):/voices" -w /voices python:3.12-slim-bookworm bash -c "pip install -q piper-tts && python -m piper.download_voices --data-dir /voices en_US-lessac-medium"
+```
 
-  With uv: `uv pip install piper-tts` then `uv run python -m piper.download_voices --data-dir voices en_US-lessac-medium`.
+**Command Prompt:**
 
-  Do **not** run `uv add Streaming` — that installs an unrelated PyPI package named `streaming`, not this project.
+```bat
+docker run --rm -v "%CD%\voices:/voices" -w /voices python:3.12-slim-bookworm bash -c "pip install -q piper-tts && python -m piper.download_voices --data-dir /voices en_US-lessac-medium"
+```
 
-- **Docker (works even if Windows wheels fail):** run a one-off container with `./voices` mounted and download inside Linux. From **cmd** in the repo root:
+You should end up with `voices\en_US-lessac-medium.onnx` and `voices\en_US-lessac-medium.onnx.json`.
 
-  ```bat
-  docker run --rm -v "%CD%\voices:/voices" -w /voices python:3.12-slim-bookworm bash -c "pip install -q piper-tts && python -m piper.download_voices --data-dir /voices en_US-lessac-medium"
-  ```
-
-  From **PowerShell**:
-
-  ```powershell
-  docker run --rm -v "$(Resolve-Path .\voices):/voices" -w /voices python:3.12-slim-bookworm bash -c "pip install -q piper-tts && python -m piper.download_voices --data-dir /voices en_US-lessac-medium"
-  ```
-
-Ensure files exist:
-
-- `voices/en_US-lessac-medium.onnx`
-- `voices/en_US-lessac-medium.onnx.json`
-
-Change `PIPER_DEFAULT_VOICE` in `docker-compose.yaml` if you use another voice name (basename without `.onnx`).
-
-## 2. Run the API (Docker)
-
-From this repo root:
+### 2. Start the TTS API
 
 ```bash
 docker compose up --build -d
 ```
 
-**Opening `http://127.0.0.1:8765/` in a browser** should show a small JSON summary (not `Not Found`). Use **`GET /health`** for a readiness check:
+Check it responds (browser or curl):
 
-```bash
-curl http://127.0.0.1:8765/health
-```
+- Open: http://127.0.0.1:8765/health  
+  You want JSON with `"status":"ok"`.
 
-Smoke test streaming (incremental NDJSON lines):
+### 3. Install the Chrome extension (unpacked)
 
-```bash
-curl -N -X POST "http://127.0.0.1:8765/v1/synthesize_stream" ^
-  -H "Content-Type: application/json" ^
-  -d "{\"text\":\"Hello from Piper. Second sentence.\"}"
-```
+1. Open `chrome://extensions` (or `edge://extensions` / `brave://extensions`).
+2. Turn on **Developer mode**.
+3. **Load unpacked** → choose this repo’s **`extension`** folder.
+4. Copy the **Extension ID** (32 letters under the extension name—you’ll need it in step 4).
 
-You should see a `meta` line, many `pcm` lines, then `done`.
+### 4. Register the native bridge (Windows)
 
-## 3. Install the Native Messaging host (Windows)
+The extension cannot call `localhost` directly; Chrome launches a small **native host** that forwards requests to Docker. This script installs that host and registers it with your browser(s).
 
-Browsers locate the host via **per-browser registry keys**. Each key’s default value must be the **full path** to `com.piper.reader.json`, which points at **`bridge.bat`** (launcher for Python + `bridge.py`).
-
-| Browser | Registry path |
-|--------|----------------|
-| Google Chrome | `HKCU\Software\Google\Chrome\NativeMessagingHosts\com.piper.reader` |
-| Microsoft Edge | `HKCU\Software\Microsoft\Edge\NativeMessagingHosts\com.piper.reader` |
-| Brave | `HKCU\Software\BraveSoftware\Brave-Browser\NativeMessagingHosts\com.piper.reader` |
-
-1. Load the **unpacked** extension in **the same browser you will use** (`chrome://extensions`, `edge://extensions`, or `brave://extensions`) → Developer mode → **Load unpacked** → select the `extension/` folder.
-2. Copy the extension ID (32-character string).
-3. Run PowerShell **from the repo root**:
+In **PowerShell** from the repo root (replace with **your** ID from step 3):
 
 ```powershell
-Set-ExecutionPolicy -Scope CurrentUser RemoteSigned -Force   # if blocked
 .\scripts\install-native-host-windows.ps1 -ExtensionId YOUR_EXTENSION_ID_HERE
 ```
 
-By default the script registers **Chrome, Edge, and Brave** (`-Browsers All`). To register only one browser:
+If scripts are blocked, run once:
 
 ```powershell
-.\scripts\install-native-host-windows.ps1 -ExtensionId YOUR_EXTENSION_ID_HERE -Browsers Edge
+Set-ExecutionPolicy -Scope CurrentUser RemoteSigned -Force
 ```
 
-Optional:
+**Fully quit** the browser (all windows), then open it again.
+
+### 5. Use it
+
+1. Leave Docker running (`docker compose up` already started the API).
+2. On any normal webpage, **select some text**.
+3. Click the extension icon → **Read selection**.
+
+---
+
+## How it works (details)
+
+### Pieces
+
+| Piece | Role |
+|--------|------|
+| **`docker compose`** | Runs **FastAPI** + **Piper** on port **8765**. Text in → streaming **NDJSON** (metadata + small **PCM audio chunks**) out. Voice files live in **`voices/`**, mounted into the container. |
+| **`extension/`** | Manifest V3 extension: reads your selection, talks to the native host, plays audio in an **offscreen** page (so audio decoding isn’t blocked by the service worker). |
+| **`native-host/bridge.py`** | **Chrome Native Messaging** program: Chrome starts it when the extension connects; it reads JSON messages from stdin and POSTs to `http://127.0.0.1:8765/v1/synthesize_stream`, then forwards each NDJSON line back to the extension as separate messages. |
+
+Data flow in one sentence: **Extension → Native Messaging → bridge.py → Docker API → Piper → audio chunks → extension → speakers.**
+
+### Why the PowerShell installer exists
+
+Chrome only runs native programs that are **registered**:
+
+1. A JSON **manifest** (`com.piper.reader.json`) lists the **launcher** (`bridge.bat`), and **`allowed_origins`**—only those extension IDs may connect.
+2. Windows **registry** tells Chrome **where that JSON file is** (per browser: Chrome, Edge, Brave each have their own key).
+
+**Reloading the extension** does **not** register the host. If you skip step 4, you typically see **“Specified native messaging host not found”** or **“forbidden”**.
+
+The installer copies `bridge.py` to `%LOCALAPPDATA%\PiperReadAloudNativeHost\`, writes `bridge.bat` + the JSON manifest, and sets those registry keys (by default for **Chrome, Edge, and Brave**).
+
+### Voices and configuration
+
+- Default voice name is **`en_US-lessac-medium`** (see `docker-compose.yaml` / `PIPER_DEFAULT_VOICE`).
+- To use another voice, put its `.onnx` + `.onnx.json` in **`voices/`** and align the env voice name with the file basename.
+
+### API endpoints (for debugging)
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| GET | `/` | Tiny JSON pointer (not a web UI). |
+| GET | `/health` | “Is the server up?” |
+| POST | `/v1/synthesize_stream` | Body: `{"text":"..."}` → streamed NDJSON (`meta`, many `pcm`, then `done`). |
+
+Example POST (PowerShell can use `curl.exe` the same way as cmd):
+
+```bash
+curl.exe -N -X POST "http://127.0.0.1:8765/v1/synthesize_stream" -H "Content-Type: application/json" -d "{\"text\":\"Hello. Second sentence.\"}"
+```
+
+### Alternative: download voices without Docker
+
+If `piper-tts` installs cleanly on your machine:
+
+```bash
+pip install piper-tts
+python -m piper.download_voices --data-dir voices en_US-lessac-medium
+```
+
+With uv: `uv pip install piper-tts`, then `uv run python -m piper.download_voices --data-dir voices en_US-lessac-medium`.
+
+Do **not** run `uv add Streaming`—that is an unrelated PyPI package.
+
+### Installer options (advanced)
 
 ```powershell
 .\scripts\install-native-host-windows.ps1 `
   -ExtensionId YOUR_EXTENSION_ID_HERE `
-  -PythonExe "C:\Path\To\Python312\python.exe" `
+  -PythonExe "C:\Path\To\python.exe" `
   -ApiUrl "http://127.0.0.1:8765/v1/synthesize_stream" `
-  -Browsers All
+  -Browsers Chrome
 ```
 
-The script copies `native-host/bridge.py` to `%LOCALAPPDATA%\PiperReadAloudNativeHost\`, writes `bridge.bat` + `com.piper.reader.json`, and updates the registry key(s).
+`-Browsers` can be `Chrome`, `Edge`, `Brave`, or `All` (default registers all three).
 
-**Fully quit and reopen** each browser you registered after installing or changing the native host.
-
-### Verify registration (PowerShell)
-
-```powershell
-# Chrome example — use the Edge or Brave path from the table above if needed
-Get-ItemProperty "HKCU:\Software\Google\Chrome\NativeMessagingHosts\com.piper.reader"
-Test-Path (Get-ItemProperty "HKCU:\Software\Google\Chrome\NativeMessagingHosts\com.piper.reader").'(default)'
-```
-
-`(Default)` must be a path to an existing JSON file. Open that JSON and confirm `"allowed_origins"` includes `chrome-extension://YOUR_ID/` (same ID as in `chrome://extensions`).
-
-### Manual template
-
-See `native-host/com.piper.reader.json.template`. Requirements:
-
-- `"path"`: absolute path to a **launcher** (here `bridge.bat`) that runs Python with `bridge.py`.
-- `"allowed_origins"`: must include `chrome-extension://<your-extension-id>/`
-
-## 4. Use the extension
-
-1. Ensure Docker is running (`docker compose ps`).
-2. Select text on a normal web page.
-3. Open the extension popup → **Read selection**.
-
-Audio is decoded in a hidden **offscreen document** (service workers cannot use `AudioContext` reliably).
+---
 
 ## Troubleshooting
 
-| Symptom | Likely cause |
+| Problem | What to try |
 |--------|----------------|
-| Popup says **Cannot reach Piper API** / HTTP errors | API not running on port **8765**, firewall, or wrong `-ApiUrl` in installer |
-| **`Specified native messaging host not found`** | Wrong browser (e.g. Edge used but only Chrome was registered), registry points to a missing JSON path, or browser not restarted — rerun installer with `-Browsers All` or the browser you use; verify registry + `Test-Path` |
-| **Access to the specified native messaging host is forbidden** | Extension ID mismatch — reinstall native host with correct `-ExtensionId`; `allowed_origins` must match exactly |
-| **`{"detail":"Not Found"}`** at `/` on an **old** image | Rebuild the container (`docker compose up --build -d`); current API defines **`GET /`** |
-| **No text selected** | Highlight text before clicking Read |
-| Voice missing errors in curl/API | ONNX + `.onnx.json` not present under `./voices` |
+| **Native messaging host not found** | Run step 4 with the correct **Extension ID**; use `-Browsers All` or match the browser you actually use; **restart** the browser completely. |
+| **Forbidden** / host blocked | Extension ID changed after reload path change—re-run the installer with the new ID. |
+| **Cannot reach API** / bridge errors | Confirm Docker is up: http://127.0.0.1:8765/health ; fix `-ApiUrl` in installer if you changed the port. |
+| **No text selected** | Highlight text before clicking **Read selection**. |
+| Voice / ONNX errors | Confirm both `.onnx` and `.onnx.json` exist under **`voices/`**. |
 
-### Logs
+**Logs:** `docker compose logs -f piper-api` — To debug the bridge, run `%LOCALAPPDATA%\PiperReadAloudNativeHost\bridge.bat` from a terminal (Chrome normally launches it for you).
 
-- API logs: `docker compose logs -f piper-api`
-- Bridge: run `bridge.bat` from `%LOCALAPPDATA%\PiperReadAloudNativeHost` in a console (Chrome normally launches it headlessly).
+---
 
-## Project layout
+## Reference
 
-- [`docker/Dockerfile`](docker/Dockerfile) — Piper + FastAPI image  
-- [`docker-compose.yaml`](docker-compose.yaml) — publish `8765`, mount `./voices`  
-- [`server/app/main.py`](server/app/main.py) — `GET /`, `GET /health`, `POST /v1/synthesize_stream` (NDJSON)  
-- [`native-host/bridge.py`](native-host/bridge.py) — stdin/out Native Messaging + streaming HTTP client  
-- [`extension/`](extension/) — MV3 extension (`background.js`, `offscreen.js`, popup)
+### Repo layout
 
-## Environment variables
+| Path | Contents |
+|------|-----------|
+| [`docker/Dockerfile`](docker/Dockerfile) | API container image |
+| [`docker-compose.yaml`](docker-compose.yaml) | Port **8765**, `./voices` mount |
+| [`server/app/main.py`](server/app/main.py) | FastAPI app |
+| [`native-host/bridge.py`](native-host/bridge.py) | Native Messaging ↔ HTTP |
+| [`extension/`](extension/) | Unpacked extension |
 
-| Variable | Default | Purpose |
+### Environment variables
+
+| Variable | Default | Meaning |
 |---------|---------|---------|
-| `PIPER_VOICES_DIR` | `/voices` | ONNX directory inside container |
-| `PIPER_DEFAULT_VOICE` | `en_US-lessac-medium` | Default basename |
-| `PIPER_BYTES_PER_PCM_CHUNK` | `8192` | Raw PCM bytes per NDJSON line |
-| `PIPER_API_URL` | `http://127.0.0.1:8765/v1/synthesize_stream` | Override API URL (bridge) |
+| `PIPER_VOICES_DIR` | `/voices` | Model directory inside container |
+| `PIPER_DEFAULT_VOICE` | `en_US-lessac-medium` | Default voice basename |
+| `PIPER_BYTES_PER_PCM_CHUNK` | `8192` | PCM bytes per streamed chunk |
+| `PIPER_API_URL` | `http://127.0.0.1:8765/v1/synthesize_stream` | Bridge target URL (set in `bridge.bat` by installer) |
+
+Manual manifest template: [`native-host/com.piper.reader.json.template`](native-host/com.piper.reader.json.template).
