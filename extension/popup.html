@@ -7,8 +7,11 @@
   </head>
   <body>
     <main>
-      <p class="hint">Select text on the page, then click Read.</p>
-      <button id="read" type="button">Read selection</button>
+      <p class="hint">
+        Normal pages: select text, then Read.<br />
+        PDFs: select text, Ctrl+C, then Read (clipboard fallback).
+      </p>
+      <button id="read" type="button">Read selection or clipboard</button>
       <p id="status" class="status" aria-live="polite"></p>
     </main>
     <script src="popup.js" type="module"></script>

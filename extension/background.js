@@ -58,40 +58,103 @@ function streamSynthesize(text, opts = {}) {
   });
 }
 
-async function readSelectionFromActiveTab() {
+/**
+ * Best-effort selection across isolated/main worlds and all frames (helps some embedded viewers).
+ * Chrome's built-in PDF viewer often blocks injection or selection APIs — callers should fall back to clipboard.
+ */
+async function getSelectionTextFromActiveTab() {
   const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
   const tab = tabs[0];
   if (!tab?.id) {
-    throw new Error('No active tab');
+    return '';
   }
 
-  const injected = await chrome.scripting.executeScript({
-    target: { tabId: tab.id },
-    func: () => window.getSelection().toString()
-  });
+  const tabId = tab.id;
+  let best = '';
 
-  const text = (injected?.[0]?.result ?? '').trim();
-  if (!text) {
-    throw new Error('No text selected');
+  const snippetRunner = () => {
+    try {
+      const sel = window.getSelection && window.getSelection();
+      return sel ? sel.toString() : '';
+    } catch {
+      return '';
+    }
+  };
+
+  for (const useMain of [true, false]) {
+    try {
+      const inject = {
+        target: { tabId, allFrames: true },
+        func: snippetRunner
+      };
+      if (useMain) {
+        inject.world = 'MAIN';
+      }
+
+      const frames = await chrome.scripting.executeScript(inject);
+      for (const { result } of frames ?? []) {
+        const s = typeof result === 'string' ? result.trim() : '';
+        if (s.length > best.length) best = s;
+      }
+    } catch {
+      /* blocked tab (e.g. chrome://), PDF internals, or policy */
+    }
   }
-  return text;
+
+  return best.trim();
 }
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
-  if (message?.type !== 'SYNTHESIZE_SELECTION') {
-    return undefined;
+  if (message?.type === 'GET_SELECTION_TEXT') {
+    getSelectionTextFromActiveTab()
+      .then((text) => sendResponse({ ok: true, text }))
+      .catch(() => sendResponse({ ok: true, text: '' }));
+    return true;
   }
 
-  (async () => {
-    try {
-      const text = await readSelectionFromActiveTab();
-      await ensureOffscreen();
-      await streamSynthesize(text);
-      sendResponse({ ok: true });
-    } catch (err) {
-      sendResponse({ ok: false, error: String(err?.message ?? err) });
+  if (message?.type === 'SYNTHESIZE_TEXT') {
+    const text = typeof message.text === 'string' ? message.text.trim() : '';
+    if (!text) {
+      sendResponse({ ok: false, error: 'No text to read' });
+      return undefined;
     }
-  })();
 
-  return true;
+    (async () => {
+      try {
+        await ensureOffscreen();
+        await streamSynthesize(text);
+        sendResponse({ ok: true });
+      } catch (err) {
+        sendResponse({ ok: false, error: String(err?.message ?? err) });
+      }
+    })();
+
+    return true;
+  }
+
+  /** @deprecated Use SYNTHESIZE_TEXT from popup (supports clipboard fallback). */
+  if (message?.type === 'SYNTHESIZE_SELECTION') {
+    (async () => {
+      try {
+        const text = await getSelectionTextFromActiveTab();
+        if (!text) {
+          sendResponse({
+            ok: false,
+            error:
+              'No text selected. In PDFs, select text then press Ctrl+C, open this popup again, and click Read.'
+          });
+          return;
+        }
+        await ensureOffscreen();
+        await streamSynthesize(text);
+        sendResponse({ ok: true });
+      } catch (err) {
+        sendResponse({ ok: false, error: String(err?.message ?? err) });
+      }
+    })();
+
+    return true;
+  }
+
+  return undefined;
 });

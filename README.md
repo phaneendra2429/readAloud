@@ -67,8 +67,8 @@ Set-ExecutionPolicy -Scope CurrentUser RemoteSigned -Force
 ### 5. Use it
 
 1. Leave Docker running (`docker compose up` already started the API).
-2. On any normal webpage, **select some text**.
-3. Click the extension icon → **Read selection**.
+2. On a normal webpage, **select some text** (or on **Chrome’s PDF viewer**, select text then **Ctrl+C** — extensions usually cannot read the PDF selection directly).
+3. Click the extension icon → **Read selection or clipboard**.
 
 ---
 
@@ -79,7 +79,7 @@ Set-ExecutionPolicy -Scope CurrentUser RemoteSigned -Force
 | Piece | Role |
 |--------|------|
 | **`docker compose`** | Runs **FastAPI** + **Piper** on port **8765**. Text in → streaming **NDJSON** (metadata + small **PCM audio chunks**) out. Voice files live in **`voices/`**, mounted into the container. |
-| **`extension/`** | Manifest V3 extension: reads your selection, talks to the native host, plays audio in an **offscreen** page (so audio decoding isn’t blocked by the service worker). |
+| **`extension/`** | Reads selection via **`chrome.scripting`** (all frames + main/isolated worlds); if empty (common on **built-in PDF**), uses **clipboard** after you **Ctrl+C**. Talks to the native host and plays audio in an **offscreen** document. |
 | **`native-host/bridge.py`** | **Chrome Native Messaging** program: Chrome starts it when the extension connects; it reads JSON messages from stdin and POSTs to `http://127.0.0.1:8765/v1/synthesize_stream`, then forwards each NDJSON line back to the extension as separate messages. |
 
 Data flow in one sentence: **Extension → Native Messaging → bridge.py → Docker API → Piper → audio chunks → extension → speakers.**
@@ -148,7 +148,7 @@ Do **not** run `uv add Streaming`—that is an unrelated PyPI package.
 | **Native messaging host not found** | Run step 4 with the correct **Extension ID**; use `-Browsers All` or match the browser you actually use; **restart** the browser completely. |
 | **Forbidden** / host blocked | Extension ID changed after reload path change—re-run the installer with the new ID. |
 | **Cannot reach API** / bridge errors | Confirm Docker is up: http://127.0.0.1:8765/health ; fix `-ApiUrl` in installer if you changed the port. |
-| **No text selected** | Highlight text before clicking **Read selection**. |
+| **No text selected** | Highlight text first; **PDF:** Chrome blocks selection APIs → select text, **Ctrl+C**, then click Read (**clipboardRead** permission). |
 | Voice / ONNX errors | Confirm both `.onnx` and `.onnx.json` exist under **`voices/`**. |
 
 **Logs:** `docker compose logs -f piper-api` — To debug the bridge, run `%LOCALAPPDATA%\PiperReadAloudNativeHost\bridge.bat` from a terminal (Chrome normally launches it for you).

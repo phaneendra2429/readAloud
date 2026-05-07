@@ -4,7 +4,7 @@
   "version": "1.0.0",
   "description": "Stream Piper neural TTS from Docker via a native messaging bridge.",
   "minimum_chrome_version": "109",
-  "permissions": ["nativeMessaging", "offscreen", "scripting", "activeTab"],
+  "permissions": ["nativeMessaging", "offscreen", "scripting", "activeTab", "clipboardRead"],
   "background": {
     "service_worker": "background.js"
   },
