@@ -1,19 +1,80 @@
 <!doctype html>
-<html>
+<html lang="en">
   <head>
     <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Piper Read Aloud</title>
     <link rel="stylesheet" href="popup.css" />
   </head>
   <body>
-    <main>
+    <div class="shell">
+      <header class="hero">
+        <div class="hero-icon" aria-hidden="true">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none">
+            <path
+              d="M12 4v16M8 8v8M16 6v12M4 10v4M20 9v6"
+              stroke="currentColor"
+              stroke-width="2"
+              stroke-linecap="round"
+            />
+          </svg>
+        </div>
+        <div class="hero-text">
+          <h1 class="title">Piper</h1>
+          <p class="subtitle">Neural read-aloud</p>
+        </div>
+      </header>
+
       <p class="hint">
-        Normal pages: select text, then Read.<br />
-        PDFs: select text, Ctrl+C, then Read (clipboard fallback).
+        <strong>Pages:</strong> select text, then <strong>Read</strong>.<br />
+        <strong>PDFs:</strong> select, <kbd>Ctrl</kbd>+<kbd>C</kbd>, then
+        <strong> Read</strong>.
       </p>
-      <button id="read" type="button">Read selection or clipboard</button>
-      <p id="status" class="status" aria-live="polite"></p>
-    </main>
-    <script src="popup.js" type="module"></script>
+
+      <button id="read" type="button" class="btn btn-primary">
+        Read selection or clipboard
+      </button>
+
+      <div class="transport" role="group" aria-label="Playback">
+        <button type="button" id="back" class="btn btn-ghost" title="Previous sentence">
+          <span class="btn-ic" aria-hidden="true">↩</span>
+          Back
+        </button>
+        <button type="button" id="pause" class="btn btn-ghost" title="Pause">
+          <span class="btn-ic" aria-hidden="true">⏸</span>
+          Pause
+        </button>
+        <button type="button" id="resume" class="btn btn-ghost" title="Resume">
+          <span class="btn-ic" aria-hidden="true">▶</span>
+          Play
+        </button>
+        <button type="button" id="forward" class="btn btn-ghost" title="Next sentence">
+          <span class="btn-ic" aria-hidden="true">↪</span>
+          Fwd
+        </button>
+      </div>
+
+      <div class="speed-block">
+        <div class="speed-head">
+          <label for="speed">Speaking rate</label>
+          <span id="speedLabel" class="speed-value">1×</span>
+        </div>
+        <input
+          id="speed"
+          type="range"
+          min="0.5"
+          max="2"
+          step="0.25"
+          value="1"
+        />
+        <p class="speed-hint">
+          Uses Piper timing (natural pitch). While playing, changing speed restarts the
+          current sentence at the new rate (after a short debounce).
+        </p>
+      </div>
+
+      <p id="status" class="status" role="status" aria-live="polite"></p>
+    </div>
+    <script src="popup.js"></script>
   </body>
 </html>

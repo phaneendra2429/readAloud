@@ -1,4 +1,6 @@
 const CHANNEL = 'OFFSCREEN_AUDIO';
+const CONTROL = 'OFFSCREEN_CONTROL';
+const QUERY = 'OFFSCREEN_QUERY';
 
 /** @type {AudioContext | null} */
 let audioCtx = null;
@@ -9,8 +11,15 @@ let metaSampleRate = 22050;
 /** @type {number} */
 let nextStartTime = 0;
 
-/** @type {Promise<void>} */
-let decodeChain = Promise.resolve();
+/** @type {number} */
+let sessionGen = 0;
+
+/**
+ * Strict ordering: native messages must not interleave async work (meta vs pcm),
+ * or scheduling overlaps and you hear doubled / delayed voices.
+ * @type {Promise<void>}
+ */
+let pipeline = Promise.resolve();
 
 function buildWavFromPcm16Le(pcmBytes, sampleRate, channels = 1) {
   const bitsPerSample = 16;
@@ -58,32 +67,75 @@ function pcmB64ToBytes(b64) {
   return out;
 }
 
+async function handleClear() {
+  sessionGen += 1;
+  nextStartTime = 0;
+  if (audioCtx && audioCtx.state !== 'closed') {
+    await audioCtx.close();
+  }
+  audioCtx = null;
+}
+
+async function handleControl(cmd) {
+  if (!cmd || typeof cmd !== 'object') return;
+
+  if (cmd.type === 'clear') {
+    await handleClear();
+    return;
+  }
+
+  if (cmd.type === 'pause') {
+    if (audioCtx && audioCtx.state === 'running') {
+      await audioCtx.suspend();
+    }
+    return;
+  }
+
+  if (cmd.type === 'resume') {
+    if (audioCtx && audioCtx.state === 'suspended') {
+      await audioCtx.resume();
+    }
+    return;
+  }
+}
+
+/**
+ * @param {unknown} msg
+ */
 async function handlePayload(msg) {
+  if (!msg || typeof msg !== 'object') return;
+
+  const myGen = sessionGen;
+
   if (msg.type === 'meta') {
     metaSampleRate = msg.sample_rate;
     await ensureAudioContext(metaSampleRate);
-    nextStartTime = audioCtx.currentTime + 0.02;
-    decodeChain = Promise.resolve();
+    const now = audioCtx.currentTime;
+    const gap = 0.02;
+    /*
+     * Do not jump nextStartTime to "now" while earlier sentences still have samples
+     * scheduled ahead — that stacks two voices. Only pull forward if we have no queue.
+     */
+    if (nextStartTime < now) {
+      nextStartTime = now + gap;
+    }
     return;
   }
 
   if (msg.type === 'pcm') {
-    decodeChain = decodeChain
-      .then(async () => {
-        if (!audioCtx) return;
-        const pcmBytes = pcmB64ToBytes(msg.b64);
-        const wav = buildWavFromPcm16Le(pcmBytes, metaSampleRate, 1);
-        const copy = wav.slice(0);
-        const decoded = await audioCtx.decodeAudioData(copy);
-        const src = audioCtx.createBufferSource();
-        src.buffer = decoded;
-        src.connect(audioCtx.destination);
+    if (myGen !== sessionGen || !audioCtx) return;
+    const pcmBytes = pcmB64ToBytes(msg.b64);
+    const wav = buildWavFromPcm16Le(pcmBytes, metaSampleRate, 1);
+    const copy = wav.slice(0);
+    const decoded = await audioCtx.decodeAudioData(copy);
+    if (myGen !== sessionGen || !audioCtx) return;
+    const src = audioCtx.createBufferSource();
+    src.buffer = decoded;
+    src.connect(audioCtx.destination);
 
-        const startAt = Math.max(audioCtx.currentTime, nextStartTime);
-        src.start(startAt);
-        nextStartTime = startAt + decoded.duration;
-      })
-      .catch((err) => console.error('[piper-offscreen]', err));
+    const startAt = Math.max(audioCtx.currentTime, nextStartTime);
+    src.start(startAt);
+    nextStartTime = startAt + decoded.duration;
     return;
   }
 
@@ -97,9 +149,32 @@ async function handlePayload(msg) {
 }
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+  if (message?.channel === QUERY && message.payload?.type === 'audioQueued') {
+    pipeline = pipeline
+      .then(() => {
+        let queued = false;
+        if (audioCtx && audioCtx.state !== 'closed') {
+          const now = audioCtx.currentTime;
+          queued = nextStartTime > now + 0.05;
+        }
+        sendResponse({ queued });
+      })
+      .catch(() => sendResponse({ queued: false }));
+    return true;
+  }
+
+  if (message?.channel === CONTROL) {
+    pipeline = pipeline
+      .then(() => handleControl(message.payload))
+      .then(() => sendResponse({ ok: true }))
+      .catch((err) => sendResponse({ ok: false, error: String(err?.message ?? err) }));
+    return true;
+  }
+
   if (message?.channel !== CHANNEL) return undefined;
 
-  handlePayload(message.payload)
+  pipeline = pipeline
+    .then(() => handlePayload(message.payload))
     .then(() => sendResponse({ ok: true }))
     .catch((err) => sendResponse({ ok: false, error: String(err?.message ?? err) }));
 
