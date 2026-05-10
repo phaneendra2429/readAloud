@@ -25,7 +25,9 @@ async function ensureOffscreen() {
 
 function sendToOffscreenControl(payload) {
   return new Promise((resolve, reject) => {
-    chrome.runtime.sendMessage({ channel: OFFSCREEN_CONTROL, payload }, (res) => {
+    const controlPayload =
+      payload?.type === 'clear' ? { ...payload, cutoffSeq: audioMessageSeq } : payload;
+    chrome.runtime.sendMessage({ channel: OFFSCREEN_CONTROL, payload: controlPayload }, (res) => {
       const err = chrome.runtime.lastError;
       if (err) {
         reject(new Error(err.message));
@@ -43,16 +45,52 @@ function sendToOffscreenControl(payload) {
 /** @type {import('chrome').runtime.Port | null} */
 let activeSynthPort = null;
 
-let synthUserAbort = false;
+/** Native ports intentionally disconnected by pause/seek/restart. */
+const abortedSynthPorts = new Set();
+
+/** Monotonic sequence used to invalidate stale chunks after clear/seek/restart. */
+let audioMessageSeq = 0;
+
+/** Monotonic sequence used to prevent stale read loops from advancing sentence state. */
+let readLoopSeq = 0;
+
+function invalidateActiveReadLoop() {
+  readLoopSeq += 1;
+}
+
+/** Monotonic sequence used so only the latest seek/restart can resume playback. */
+let seekSeq = 0;
+
+function beginPlaybackRestart() {
+  seekSeq += 1;
+  invalidateActiveReadLoop();
+  abortSynthesis();
+  return seekSeq;
+}
+
+function replaceCurrentSessionAt(index) {
+  if (!session) return null;
+  session = {
+    ...session,
+    id: ++sessionIdSeq,
+    index,
+    paused: false,
+    cancelled: false,
+    seeking: true
+  };
+  return session;
+}
 
 function abortSynthesis() {
-  synthUserAbort = true;
+  const port = activeSynthPort;
+  if (!port) return;
+  abortedSynthPorts.add(port);
   try {
-    activeSynthPort?.disconnect();
+    port.disconnect();
   } catch {
     /* ignore */
   }
-  activeSynthPort = null;
+  if (activeSynthPort === port) activeSynthPort = null;
 }
 
 function splitSentences(text) {
@@ -122,15 +160,18 @@ function buildPlaybackState() {
 
 async function queryOffscreenAudioQueued() {
   return new Promise((resolve) => {
+    const timeout = setTimeout(() => resolve(false), 500);
     try {
       chrome.runtime.sendMessage(
         { channel: OFFSCREEN_QUERY, payload: { type: 'audioQueued' } },
         (res) => {
+          clearTimeout(timeout);
           void chrome.runtime.lastError;
           resolve(!!res?.queued);
         }
       );
     } catch {
+      clearTimeout(timeout);
       resolve(false);
     }
   });
@@ -266,7 +307,6 @@ function speedToLengthScale(speed) {
 function streamSynthesize(text, opts = {}) {
   return new Promise((resolve, reject) => {
     let settled = false;
-    synthUserAbort = false;
     const port = chrome.runtime.connectNative('com.piper.reader');
     activeSynthPort = port;
 
@@ -278,30 +318,33 @@ function streamSynthesize(text, opts = {}) {
     });
 
     port.onMessage.addListener((msg) => {
+      const payload = { ...msg, audioSeq: ++audioMessageSeq };
       chrome.runtime.sendMessage(
-        { channel: OFFSCREEN_AUDIO, payload: msg },
+        { channel: OFFSCREEN_AUDIO, payload },
         () => void chrome.runtime.lastError
       );
 
       if (msg?.type === 'done') {
         settled = true;
-        activeSynthPort = null;
+        abortedSynthPorts.delete(port);
+        if (activeSynthPort === port) activeSynthPort = null;
         port.disconnect();
         resolve();
       } else if (msg?.type === 'error') {
         settled = true;
-        activeSynthPort = null;
+        abortedSynthPorts.delete(port);
+        if (activeSynthPort === port) activeSynthPort = null;
         port.disconnect();
         reject(new Error(msg.message || 'Native host reported an error'));
       }
     });
 
     port.onDisconnect.addListener(() => {
-      activeSynthPort = null;
+      if (activeSynthPort === port) activeSynthPort = null;
       if (settled) return;
       const last = chrome.runtime.lastError?.message;
-      if (synthUserAbort) {
-        synthUserAbort = false;
+      if (abortedSynthPorts.has(port)) {
+        abortedSynthPorts.delete(port);
         reject(Object.assign(new Error('Playback aborted'), { code: 'ABORTED' }));
         return;
       }
@@ -310,15 +353,52 @@ function streamSynthesize(text, opts = {}) {
   });
 }
 
-/**
- * Single queue so only one read loop runs at a time; new calls chain after the current worker.
- * @type {Promise<void>}
- */
-let readSessionTail = Promise.resolve();
+async function waitForOffscreenPlaybackEnd(loopId, loopSeq) {
+  while (true) {
+    if (
+      !session ||
+      session.id !== loopId ||
+      loopSeq !== readLoopSeq ||
+      session.cancelled ||
+      session.seeking
+    ) {
+      return false;
+    }
 
-async function runReadSessionWorker() {
-  const loopId = session?.id;
-  while (session && session.id === loopId && !session.cancelled) {
+    const queued = await queryOffscreenAudioQueued();
+
+    if (
+      !session ||
+      session.id !== loopId ||
+      loopSeq !== readLoopSeq ||
+      session.cancelled ||
+      session.seeking
+    ) {
+      return false;
+    }
+    if (!queued) {
+      return true;
+    }
+
+    await new Promise((r) => setTimeout(r, 100));
+  }
+}
+
+/**
+ * Currently running read loop key. We intentionally do not queue behind old loops:
+ * pause/seek/new-read invalidates old loop tokens, then the new loop starts immediately.
+ * Waiting behind the old promise can deadlock if Chrome is slow to disconnect native messaging.
+ * @type {string | null}
+ */
+let activeReadLoopKey = null;
+
+async function runReadSessionWorker(loopId, loopSeq) {
+  while (
+    session &&
+    session.id === loopId &&
+    loopSeq === readLoopSeq &&
+    !session.cancelled
+  ) {
     if (session.paused) return;
 
     if (session.index >= session.sentences.length) {
@@ -335,6 +415,8 @@ async function runReadSessionWorker() {
         voice: session.voice,
         length_scale: speedToLengthScale(session.playbackRate)
       });
+      const played = await waitForOffscreenPlaybackEnd(loopId, loopSeq);
+      if (!played) return;
     } catch (err) {
       const code = /** @type {{ code?: string }} */ (err)?.code;
       if (code === 'ABORTED' && session?.paused) {
@@ -355,7 +437,7 @@ async function runReadSessionWorker() {
       return;
     }
 
-    if (!session || session.id !== loopId || session.cancelled) return;
+    if (!session || session.id !== loopId || loopSeq !== readLoopSeq || session.cancelled) return;
     if (session.paused) return;
 
     session.index += 1;
@@ -369,10 +451,21 @@ async function runReadSessionWorker() {
 }
 
 function runReadSession() {
-  readSessionTail = readSessionTail
-    .then(() => runReadSessionWorker())
-    .catch((e) => console.error('[piper-read]', e));
-  return readSessionTail;
+  const loopId = session?.id;
+  const loopSeq = readLoopSeq;
+  if (!loopId) return;
+
+  const key = `${loopId}:${loopSeq}`;
+  if (activeReadLoopKey === key) return;
+  activeReadLoopKey = key;
+
+  void runReadSessionWorker(loopId, loopSeq)
+    .catch((e) => console.error('[piper-read]', e))
+    .finally(() => {
+      if (activeReadLoopKey === key) {
+        activeReadLoopKey = null;
+      }
+    });
 }
 
 function queuePlaybackRateRestart() {
@@ -387,12 +480,13 @@ async function applyPlaybackRateRestart() {
   await hydratePlaybackSession();
   if (!session || session.paused) return;
   session.seeking = true;
-  abortSynthesis();
+  const mySeekSeq = beginPlaybackRestart();
   try {
     await sendToOffscreenControl({ type: 'clear' });
   } catch (_) {
     /* ignore */
   }
+  if (!session || mySeekSeq !== seekSeq) return;
   session.seeking = false;
   await persistPlaybackSnapshot();
   runReadSession();
@@ -522,8 +616,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         return;
       }
       session.paused = true;
-      abortSynthesis();
-      void sendToOffscreenControl({ type: 'clear' }).catch(() => {});
+      void sendToOffscreenControl({ type: 'pause' }).catch(() => {});
       await persistPlaybackSnapshot();
       sendResponse({ ok: true });
     })();
@@ -540,6 +633,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       session.paused = false;
       await persistPlaybackSnapshot();
       sendResponse({ ok: true });
+      void sendToOffscreenControl({ type: 'resume' }).catch(() => {});
       void runReadSession();
     })();
     return true;
@@ -552,17 +646,19 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         sendResponse({ ok: false, error: 'Nothing playing' });
         return;
       }
-      const snap = session;
-      snap.index = Math.max(0, snap.index - 1);
-      snap.paused = false;
-      snap.seeking = true;
-      abortSynthesis();
+      const snap = replaceCurrentSessionAt(Math.max(0, session.index - 1));
+      if (!snap) {
+        sendResponse({ ok: false, error: 'Nothing playing' });
+        return;
+      }
+      const mySeekSeq = beginPlaybackRestart();
       sendResponse({ ok: true });
       try {
         await sendToOffscreenControl({ type: 'clear' });
+        if (!session || session !== snap || mySeekSeq !== seekSeq) return;
         snap.seeking = false;
         await persistPlaybackSnapshot();
-        await runReadSession();
+        void runReadSession();
       } catch (e) {
         console.error(e);
         snap.seeking = false;
@@ -578,21 +674,25 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         sendResponse({ ok: false, error: 'Nothing playing' });
         return;
       }
-      const snap = session;
-      snap.paused = false;
-      snap.seeking = true;
-      if (snap.index < snap.sentences.length - 1) {
-        snap.index += 1;
+      let nextIndex;
+      if (session.index < session.sentences.length - 1) {
+        nextIndex = session.index + 1;
       } else {
-        snap.index = snap.sentences.length;
+        nextIndex = session.sentences.length;
       }
-      abortSynthesis();
+      const snap = replaceCurrentSessionAt(nextIndex);
+      if (!snap) {
+        sendResponse({ ok: false, error: 'Nothing playing' });
+        return;
+      }
+      const mySeekSeq = beginPlaybackRestart();
       sendResponse({ ok: true });
       try {
         await sendToOffscreenControl({ type: 'clear' });
+        if (!session || session !== snap || mySeekSeq !== seekSeq) return;
         snap.seeking = false;
         await persistPlaybackSnapshot();
-        await runReadSession();
+        void runReadSession();
       } catch (e) {
         console.error(e);
         snap.seeking = false;
@@ -615,7 +715,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     }
 
     (async () => {
-      abortSynthesis();
+      beginPlaybackRestart();
 
       const prevRate = session?.playbackRate ?? defaultPlaybackRate;
       const newSession = {
@@ -663,7 +763,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
           sendResponse({ ok: false, error: 'No text to read' });
           return;
         }
-        abortSynthesis();
+        beginPlaybackRestart();
         const prevRate = session?.playbackRate ?? defaultPlaybackRate;
         const newSession = {
           id: ++sessionIdSeq,

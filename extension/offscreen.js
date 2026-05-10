@@ -21,6 +21,12 @@ let sessionGen = 0;
  */
 let pipeline = Promise.resolve();
 
+/** Ignore already-enqueued chunks after a clear/seek/restart. */
+let ignoreAudioSeqAtOrBelow = 0;
+
+/** Whether playback should stay suspended even if more chunks arrive. */
+let playbackPaused = false;
+
 function buildWavFromPcm16Le(pcmBytes, sampleRate, channels = 1) {
   const bitsPerSample = 16;
   const blockAlign = channels * (bitsPerSample / 8);
@@ -55,7 +61,10 @@ async function ensureAudioContext(sampleRate) {
   if (!audioCtx || audioCtx.state === 'closed') {
     audioCtx = new AudioContext({ sampleRate });
   }
-  if (audioCtx.state === 'suspended') {
+  if (playbackPaused && audioCtx.state === 'running') {
+    await audioCtx.suspend();
+  }
+  if (!playbackPaused && audioCtx.state === 'suspended') {
     await audioCtx.resume();
   }
 }
@@ -67,9 +76,14 @@ function pcmB64ToBytes(b64) {
   return out;
 }
 
-async function handleClear() {
+async function handleClear(cmd = {}) {
   sessionGen += 1;
   nextStartTime = 0;
+  playbackPaused = false;
+  ignoreAudioSeqAtOrBelow = Math.max(
+    ignoreAudioSeqAtOrBelow,
+    Number(cmd.cutoffSeq) || 0
+  );
   if (audioCtx && audioCtx.state !== 'closed') {
     await audioCtx.close();
   }
@@ -80,11 +94,12 @@ async function handleControl(cmd) {
   if (!cmd || typeof cmd !== 'object') return;
 
   if (cmd.type === 'clear') {
-    await handleClear();
+    await handleClear(cmd);
     return;
   }
 
   if (cmd.type === 'pause') {
+    playbackPaused = true;
     if (audioCtx && audioCtx.state === 'running') {
       await audioCtx.suspend();
     }
@@ -92,6 +107,7 @@ async function handleControl(cmd) {
   }
 
   if (cmd.type === 'resume') {
+    playbackPaused = false;
     if (audioCtx && audioCtx.state === 'suspended') {
       await audioCtx.resume();
     }
@@ -104,6 +120,9 @@ async function handleControl(cmd) {
  */
 async function handlePayload(msg) {
   if (!msg || typeof msg !== 'object') return;
+  if (msg.audioSeq != null && (Number(msg.audioSeq) || 0) <= ignoreAudioSeqAtOrBelow) {
+    return;
+  }
 
   const myGen = sessionGen;
 
@@ -150,22 +169,17 @@ async function handlePayload(msg) {
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message?.channel === QUERY && message.payload?.type === 'audioQueued') {
-    pipeline = pipeline
-      .then(() => {
-        let queued = false;
-        if (audioCtx && audioCtx.state !== 'closed') {
-          const now = audioCtx.currentTime;
-          queued = nextStartTime > now + 0.05;
-        }
-        sendResponse({ queued });
-      })
-      .catch(() => sendResponse({ queued: false }));
+    let queued = false;
+    if (audioCtx && audioCtx.state !== 'closed') {
+      const now = audioCtx.currentTime;
+      queued = nextStartTime > now + 0.05;
+    }
+    sendResponse({ queued });
     return true;
   }
 
   if (message?.channel === CONTROL) {
-    pipeline = pipeline
-      .then(() => handleControl(message.payload))
+    handleControl(message.payload)
       .then(() => sendResponse({ ok: true }))
       .catch((err) => sendResponse({ ok: false, error: String(err?.message ?? err) }));
     return true;
