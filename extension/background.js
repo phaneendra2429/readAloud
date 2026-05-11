@@ -137,6 +137,38 @@ let playbackStateBroadcastTimer = null;
 /** @type {ReturnType<typeof setTimeout> | number} */
 let rateRestartTimer = 0;
 
+/** Serialized floater payload — skip duplicate tab fan-out. */
+let lastFloaterBroadcastKey = '';
+
+/** @param {any} st @param {{ force?: boolean }} [opts] */
+async function broadcastFloaterToTabs(st, opts = {}) {
+  const key = JSON.stringify({
+    a: st.active,
+    p: st.paused,
+    i: st.index,
+    t: st.total,
+    l: st.lostSession
+  });
+  if (!opts.force && key === lastFloaterBroadcastKey) return;
+  lastFloaterBroadcastKey = key;
+
+  const msg = { type: 'PIPER_FLOAT_STATE', state: st };
+  let tabs;
+  try {
+    tabs = await chrome.tabs.query({});
+  } catch {
+    return;
+  }
+  for (const tab of tabs ?? []) {
+    if (tab.id == null) continue;
+    try {
+      await chrome.tabs.sendMessage(tab.id, msg);
+    } catch {
+      void chrome.runtime.lastError;
+    }
+  }
+}
+
 function buildPlaybackState() {
   if (!session) {
     return {
@@ -220,6 +252,7 @@ async function broadcastPlaybackStateAsync() {
       popupStatePorts.delete(port);
     }
   }
+  await broadcastFloaterToTabs(st);
 }
 
 function ensurePlaybackStateBroadcastLoop() {
@@ -246,19 +279,19 @@ async function persistPlaybackSnapshot() {
   try {
     if (!session) {
       await playbackStorageArea().remove(PLAYBACK_SNAP_KEY);
-      return;
+    } else {
+      await playbackStorageArea().set({
+        [PLAYBACK_SNAP_KEY]: {
+          savedAt: Date.now(),
+          id: session.id,
+          sentences: session.sentences,
+          index: session.index,
+          paused: session.paused,
+          playbackRate: session.playbackRate,
+          voice: session.voice
+        }
+      });
     }
-    await playbackStorageArea().set({
-      [PLAYBACK_SNAP_KEY]: {
-        savedAt: Date.now(),
-        id: session.id,
-        sentences: session.sentences,
-        index: session.index,
-        paused: session.paused,
-        playbackRate: session.playbackRate,
-        voice: session.voice
-      }
-    });
   } catch (e) {
     console.warn('[piper-read] persist snapshot', e);
   }
@@ -507,6 +540,34 @@ chrome.runtime.onConnect.addListener((port) => {
   port.onDisconnect.addListener(() => {
     popupStatePorts.delete(port);
   });
+});
+
+async function syncFloaterForActiveTabs() {
+  await hydratePlaybackSession();
+  const st = await getPlaybackStateForUi();
+  if (!st.active && !st.lostSession) return;
+  lastFloaterBroadcastKey = '';
+  await broadcastFloaterToTabs(st, { force: true });
+}
+
+/** @type {ReturnType<typeof setTimeout> | number} */
+let floaterFocusSyncTimer = 0;
+
+function scheduleFloaterFocusSync() {
+  clearTimeout(floaterFocusSyncTimer);
+  floaterFocusSyncTimer = setTimeout(() => {
+    floaterFocusSyncTimer = 0;
+    void syncFloaterForActiveTabs();
+  }, 120);
+}
+
+chrome.tabs.onActivated.addListener(() => {
+  scheduleFloaterFocusSync();
+});
+
+chrome.windows.onFocusChanged.addListener((winId) => {
+  if (winId === chrome.windows.WINDOW_ID_NONE) return;
+  scheduleFloaterFocusSync();
 });
 
 /**

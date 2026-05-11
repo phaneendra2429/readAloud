@@ -12,6 +12,14 @@
     "clipboardRead",
     "storage"
   ],
+  "content_scripts": [
+    {
+      "matches": ["http://*/*", "https://*/*", "file://*/*"],
+      "js": ["content/floater.js"],
+      "run_at": "document_idle",
+      "all_frames": false
+    }
+  ],
   "background": {
     "service_worker": "background.js"
   },
